@@ -57,7 +57,7 @@ class lstm_param:
 
 
     for param in [self.dWg, self.dWi, self.dWf, self.dWo, self.dbg, self.dbi, self.dbf, self.dbo]:
-      np.clip(param,-5,5,out=param)  
+      np.clip(param,-1,1,out=param)  
 
 
     self.mWg += self.dWg*self.dWg
@@ -69,6 +69,7 @@ class lstm_param:
     self.mbf += self.dbf*self.dbf
     self.mbo += self.dbo*self.dbo
 
+    
     self.Wg -= learning_rate*self.dWg/(np.sqrt(self.mWg + 1e-8))
     self.Wi -= learning_rate*self.dWi/(np.sqrt(self.mWi + 1e-8))
     self.Wf -= learning_rate*self.dWf/(np.sqrt(self.mWf + 1e-8))
@@ -77,6 +78,20 @@ class lstm_param:
     self.bi -= learning_rate*self.dbi/(np.sqrt(self.mbi + 1e-8))
     self.bf -= learning_rate*self.dbf/(np.sqrt(self.mbf + 1e-8))
     self.bo -= learning_rate*self.dbo/(np.sqrt(self.mbo + 1e-8))
+    
+    """
+    self.Wg -= learning_rate*self.dWg
+    self.Wi -= learning_rate*self.dWi
+    self.Wf -= learning_rate*self.dWf
+    self.Wo -= learning_rate*self.dWo
+    self.bg -= learning_rate*self.dbg
+    self.bi -= learning_rate*self.dbi
+    self.bf -= learning_rate*self.dbf
+    self.bo -= learning_rate*self.dbo
+    """
+
+
+
 
 
 class lstm_states:
@@ -117,17 +132,13 @@ class LSTMUnit:
     self.lstm_param = lstm_param(input_dim,num_hidden_units)
     self.state_vars = lstm_states()  
  
-  def reset(self):
-    self.state_vars.cprev = np.zeros((self.num_hidden_units,1))
-    self.state_vars.hprev = np.zeros((self.num_hidden_units,1)) 
-
-  def forward(self,x,seq_id):
+  def forward(self,x,seq_id,hprev,cprev):
 
     if seq_id == 0:
       self.state_vars.reinit()
       self.lstm_param.reinit()
-      self.state_vars.C[-1] = np.copy(self.state_vars.cprev)
-      self.state_vars.h[-1] = np.copy(self.state_vars.hprev)
+      self.state_vars.C[-1] = np.copy(cprev)
+      self.state_vars.h[-1] = np.copy(hprev)
 
     states = self.state_vars
     states.xc[seq_id] = np.resize(np.hstack((states.h[seq_id-1].flatten(),x.flatten())),(self.input_dim+self.num_hidden_units,1))
@@ -136,20 +147,20 @@ class LSTMUnit:
     states.fg[seq_id] = sigmoid(np.dot(self.lstm_param.Wf,states.xc[seq_id]) + self.lstm_param.bf)
     states.og[seq_id] = sigmoid(np.dot(self.lstm_param.Wo,states.xc[seq_id]) + self.lstm_param.bo)
     states.C[seq_id] =  states.ig[seq_id]*states.g[seq_id] + states.fg[seq_id]*states.C[seq_id - 1]
-    states.h[seq_id] =  states.og[seq_id]*states.C[seq_id]
+    states.h[seq_id] =  states.og[seq_id]*np.tanh(states.C[seq_id])
 
-    self.state_vars.cprev = np.copy(self.state_vars.C[seq_id])
-    self.state_vars.hprev = np.copy(self.state_vars.h[seq_id])
 
-    return states.h[seq_id]
+    return states.h[seq_id],states.C[seq_id]
 
   def backward(self,top_diff_h,i):
 
     states = self.state_vars
     dh = top_diff_h + states.dhnext
-    dC = dh*states.og[i] + states.dCnext
+    C_1 = (1-(np.tanh(states.C[i]))**2)
 
-    dog = dh*states.C[i]
+    dC = dh*states.og[i]*C_1 + states.dCnext
+
+    dog = dh*np.tanh(states.C[i])
     dig = dC*states.g[i]
     dfg = dC*states.C[i-1]
     dg = dC*states.ig[i]
@@ -181,7 +192,7 @@ class LSTMUnit:
     return dx
 
 
-def get_loss(inputs,outputs,Wy,by,lstm_units,vocab_size,seq_len):
+def get_loss(inputs,outputs,Wy,by,lstm_units,vocab_size,seq_len,hprev,cprev):
   
   loss = 0
   for i in range(seq_len):
@@ -189,7 +200,7 @@ def get_loss(inputs,outputs,Wy,by,lstm_units,vocab_size,seq_len):
     x = np.zeros((vocab_size,1))
     x[idx] = 1
     for j in range(len(lstm_units)):
-      h = lstm_units[j].forward(x,i)
+      h,c = lstm_units[j].forward(x,i,hprev[j],cprev[j])
       x = np.copy(h)
 
     y = np.dot(Wy,h) + by
@@ -200,21 +211,26 @@ def get_loss(inputs,outputs,Wy,by,lstm_units,vocab_size,seq_len):
   return loss
 
 
-def forward_backward(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size):
+def forward_backward(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size,hprev1,cprev1):
 
   probs = {}
   loss = 0
   dWy = np.zeros_like(Wy)
   dby = np.zeros_like(by)
- 
+  hprev = {}
+  cprev = {}   
+
   for j in range(seq_len):
     x = np.zeros((vocab_size,1))
     x[inputs[j]] = 1
     target = outputs[j]
 
     for k in range(num_lstm_layers):
-      h1 = lstm_units[k].forward(x,j)
+      h1,c1 = lstm_units[k].forward(x,j,hprev1[k],cprev1[k])
       x = np.copy(h1)
+      hprev[k] = np.copy(h1)
+      cprev[k] = np.copy(c1)
+      
 
     y = np.dot(Wy,h1) + by
 
@@ -238,11 +254,11 @@ def forward_backward(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size):
       dh = lstm_units[k].backward(dh,j)
 
 
-  return dWy,dby,loss
+  return dWy,dby,loss,hprev,cprev
 
 
 
-def sample(id1,Wy,by,lstm_units,vocab_size,index_char,seq_len):
+def sample(id1,Wy,by,lstm_units,vocab_size,index_char,seq_len,hprev,cprev):
   idx = id1
   seq = []
   seq.append(index_to_char[idx])
@@ -251,7 +267,7 @@ def sample(id1,Wy,by,lstm_units,vocab_size,index_char,seq_len):
     x = np.zeros((vocab_size,1))
     x[idx] = 1
     for j in range(len(lstm_units)):
-      h = lstm_units[j].forward(x,i)
+      h,c = lstm_units[j].forward(x,i,hprev[j],cprev[j])
       x = np.copy(h)
 
     y = np.dot(Wy,h) + by
@@ -262,10 +278,44 @@ def sample(id1,Wy,by,lstm_units,vocab_size,index_char,seq_len):
   return seq  
 
 
-def gradCheck(inputs,target,Wy,by,lstm_units,seq_len,vocab_size):
+def gradCheck(inputs,target,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev):
 
-  num_checks, delta = 20, 1e-5
-  dWy,dby,loss = forward_backward(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size)
+  num_checks, delta = 10, 1e-5
+  dWy,dby,loss,_,_ = forward_backward(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev)
+  idx = 0
+  for param,dparam,name in zip([Wy,lstm_units[idx].lstm_param.Wg, lstm_units[idx].lstm_param.Wi, lstm_units[idx].lstm_param.Wf, lstm_units[idx].lstm_param.Wo,by,lstm_units[idx].lstm_param.bg,lstm_units[idx].lstm_param.bi,lstm_units[idx].lstm_param.bf,lstm_units[idx].lstm_param.bo], [dWy,lstm_units[idx].lstm_param.dWg, lstm_units[idx].lstm_param.dWi,lstm_units[idx].lstm_param.dWf, lstm_units[idx].lstm_param.dWo,dby,lstm_units[idx].lstm_param.dbg,lstm_units[idx].lstm_param.dbi,lstm_units[idx].lstm_param.dbf,lstm_units[idx].lstm_param.dbo], ['Wy', 'Wg-0', 'Wi-0', 'Wf-0', 'Wo-0','by','bg-0','bi-0','bf-0','bo-0']):
+
+    s0 = dparam.shape
+    s1 = param.shape
+    assert s0 == s1, 'Error dims dont match: %s and %s.' % (`s0`, `s1`)
+    print name
+    if True:
+      for i in xrange(num_checks):
+        ri = int(uniform(0,param.size))
+        # evaluate cost at [x + delta] and [x - delta]
+        old_val = param.flat[ri]
+        param.flat[ri] = old_val + delta
+
+        cg0 = get_loss(inputs,target,Wy,by,lstm_units,vocab_size,seq_len,hprev,cprev)
+
+        param.flat[ri] = old_val - delta
+
+        cg1 = get_loss(inputs,target,Wy,by,lstm_units,vocab_size,seq_len,hprev,cprev)
+
+        param.flat[ri] = old_val # reset old value for this parameter
+        # fetch both numerical and analytic gradient
+        grad_analytic = dparam.flat[ri]
+        grad_numerical = (cg0 - cg1) / ( 2 * delta )
+        rel_error = abs(grad_analytic - grad_numerical) / abs(grad_numerical + grad_analytic)
+        print '%f, %f => %e ' % (grad_numerical, grad_analytic, rel_error)
+        # rel_error should be on order of 1e-7 or less
+
+
+
+def gradCheck_full(inputs,target,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev):
+
+  num_checks, delta = 10, 1e-5
+  dWy,dby,loss,_,_ = forward_backward(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev)
 
   for param,dparam,name in zip([Wy,lstm_units[0].lstm_param.Wg, lstm_units[0].lstm_param.Wi, lstm_units[0].lstm_param.Wf, lstm_units[0].lstm_param.Wo, lstm_units[1].lstm_param.Wg,lstm_units[1].lstm_param.Wi,lstm_units[1].lstm_param.Wf,lstm_units[1].lstm_param.Wo,by,lstm_units[0].lstm_param.bg,lstm_units[0].lstm_param.bi,lstm_units[0].lstm_param.bf,lstm_units[0].lstm_param.bo,lstm_units[1].lstm_param.bg,lstm_units[1].lstm_param.bi,lstm_units[1].lstm_param.bf,lstm_units[1].lstm_param.bo], [dWy,lstm_units[0].lstm_param.dWg, lstm_units[0].lstm_param.dWi,lstm_units[0].lstm_param.dWf, lstm_units[0].lstm_param.dWo, lstm_units[1].lstm_param.dWg,lstm_units[1].lstm_param.dWi,lstm_units[1].lstm_param.dWf,lstm_units[1].lstm_param.dWo,dby,lstm_units[0].lstm_param.dbg,lstm_units[0].lstm_param.dbi,lstm_units[0].lstm_param.dbf,lstm_units[0].lstm_param.dbo,lstm_units[1].lstm_param.dbg,lstm_units[1].lstm_param.dbi,lstm_units[1].lstm_param.dbf,lstm_units[1].lstm_param.dbo], ['Wy', 'Wg-0', 'Wi-0', 'Wf-0', 'Wo-0','Wg-1','Wi-1','Wf-1','Wo-1','by','bg-0','bi-0','bf-0','bo-0','bg-1','bi-1','bf-1','bo-1']):
     
@@ -280,17 +330,11 @@ def gradCheck(inputs,target,Wy,by,lstm_units,seq_len,vocab_size):
         old_val = param.flat[ri]
         param.flat[ri] = old_val + delta
 
-        lstm_units[0].reset()
-        lstm_units[1].reset()
-
-        cg0 = get_loss(inputs,target,Wy,by,lstm_units,vocab_size,seq_len)
+        cg0 = get_loss(inputs,target,Wy,by,lstm_units,vocab_size,seq_len,hprev,cprev)
 
         param.flat[ri] = old_val - delta
 
-        lstm_units[0].reset()
-        lstm_units[1].reset()
-
-        cg1 = get_loss(inputs,target,Wy,by,lstm_units,vocab_size,seq_len)
+        cg1 = get_loss(inputs,target,Wy,by,lstm_units,vocab_size,seq_len,hprev,cprev)
 
         param.flat[ri] = old_val # reset old value for this parameter
         # fetch both numerical and analytic gradient
@@ -299,7 +343,6 @@ def gradCheck(inputs,target,Wy,by,lstm_units,seq_len,vocab_size):
         rel_error = abs(grad_analytic - grad_numerical) / abs(grad_numerical + grad_analytic)
         print '%f, %f => %e ' % (grad_numerical, grad_analytic, rel_error)
         # rel_error should be on order of 1e-7 or less
-
 
 txtFile = sys.argv[1]
 num_lstm_layers = 2
@@ -317,7 +360,7 @@ lstm_units = {}
 
 input_dim = vocab_size
 num_hidden_units = 100
-learning_rate = 0.001
+learning_rate = 0.1
 
 
 for i in range(num_lstm_layers):
@@ -338,32 +381,63 @@ i=0
 inputs = [char_to_index[ch] for ch in data[i*seq_len:(i+1)*seq_len]]
 outputs= [char_to_index[ch] for ch in data[i*seq_len + 1:(i+1)*seq_len + 1]]
 
-gradCheck(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size)
+hprev = {}
+cprev = {}
 
 for i in range(num_lstm_layers):
-  lstm_units[i].reset()
+  hprev[i] = np.zeros((num_hidden_units,1))
+  cprev[i] = np.zeros((num_hidden_units,1))
 
-pdb.set_trace()
 
-if True:
+gradCheck(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev)
+
+
+#pdb.set_trace()
+
+while True:
+
+  for i in range(num_lstm_layers):
+    hprev[i] = np.zeros((num_hidden_units,1))
+    cprev[i] = np.zeros((num_hidden_units,1))
+
 
   for i in range(len(data)/seq_len):
     inputs = [char_to_index[ch] for ch in data[i*seq_len:(i+1)*seq_len]]
     outputs= [char_to_index[ch] for ch in data[i*seq_len + 1:(i+1)*seq_len + 1]]
 
-    dWy,dby,loss = forward_backward(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size)
-       
+    dWy,dby,loss,hprev,cprev = forward_backward(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev)
+     
+    #pdb.set_trace()
+ 
+    np.clip(dWy,-1,1,out=dWy)
+    np.clip(dby,-1,1,out=dby)
+
+ 
     mWy += (dWy)*(dWy)
     mby += (dby)*(dby)
 
     Wy -= learning_rate*dWy/(np.sqrt(mWy + 1e-8))
     by -= learning_rate*dby/(np.sqrt(mby + 1e-8))
 
+    #Wy -= learning_rate*dWy
+    #by -= learning_rate*dby
+
+
+    #pdb.set_trace()
+
+
     for k in range(num_lstm_layers):
       lstm_units[k].lstm_param.adagrad_step(learning_rate)
 
     if count%100 == 0:
-      pdb.set_trace()
-      seq = sample(inputs[0],Wy,by,lstm_units,vocab_size,index_to_char,50)
+
+      #gradCheck(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev)
+      #pdb.set_trace()
+      seq = sample(inputs[0],Wy,by,lstm_units,vocab_size,index_to_char,50,hprev,cprev)
       txt = ''.join(ix for ix in seq)
       print txt
+
+    count += 1
+
+    #if count%1000 == 0:
+    #  gradCheck(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev)
