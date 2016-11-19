@@ -57,7 +57,7 @@ class lstm_param:
 
 
     for param in [self.dWg, self.dWi, self.dWf, self.dWo, self.dbg, self.dbi, self.dbf, self.dbo]:
-      np.clip(param,-1,1,out=param)  
+      np.clip(param,-5,5,out=param)  
 
 
     self.mWg += self.dWg*self.dWg
@@ -96,7 +96,7 @@ class lstm_param:
 
 class lstm_states:
 
-  def __init__(self):
+  def __init__(self,num_hidden_units):
     self.xc = {}
     self.g  = {}
     self.h  = {}
@@ -110,7 +110,7 @@ class lstm_states:
     self.dhnext = np.zeros((num_hidden_units,1))
     self.dCnext = np.zeros((num_hidden_units,1))
 
-  def reinit(self):
+  def reinit(self,num_hidden_units):
     self.xc = {}
     self.g  = {}
     self.h  = {}
@@ -130,12 +130,12 @@ class LSTMUnit:
     self.num_hidden_units = num_hidden_units 
     self.input_dim = input_dim 
     self.lstm_param = lstm_param(input_dim,num_hidden_units)
-    self.state_vars = lstm_states()  
+    self.state_vars = lstm_states(num_hidden_units)  
  
   def forward(self,x,seq_id,hprev,cprev):
 
     if seq_id == 0:
-      self.state_vars.reinit()
+      self.state_vars.reinit(self.num_hidden_units)
       self.lstm_param.reinit()
       self.state_vars.C[-1] = np.copy(cprev)
       self.state_vars.h[-1] = np.copy(hprev)
@@ -219,6 +219,7 @@ def forward_backward(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size,hprev1,c
   dby = np.zeros_like(by)
   hprev = {}
   cprev = {}   
+  num_lstm_layers = len(lstm_units)
 
   for j in range(seq_len):
     x = np.zeros((vocab_size,1))
@@ -261,7 +262,7 @@ def forward_backward(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size,hprev1,c
 def sample(id1,Wy,by,lstm_units,vocab_size,index_char,seq_len,hprev,cprev):
   idx = id1
   seq = []
-  seq.append(index_to_char[idx])
+  seq.append(index_char[idx])
  
   for i in range(seq_len):
     x = np.zeros((vocab_size,1))
@@ -273,7 +274,7 @@ def sample(id1,Wy,by,lstm_units,vocab_size,index_char,seq_len,hprev,cprev):
     y = np.dot(Wy,h) + by
     probs = np.exp(y)/sum(np.exp(y))
     idx = np.random.choice(range(vocab_size),p=probs.ravel())
-    seq.append(index_to_char[idx])
+    seq.append(index_char[idx])
 
   return seq  
 
@@ -281,7 +282,7 @@ def sample(id1,Wy,by,lstm_units,vocab_size,index_char,seq_len,hprev,cprev):
 def gradCheck(inputs,target,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev):
 
   num_checks, delta = 10, 1e-5
-  dWy,dby,loss,_,_ = forward_backward(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev)
+  dWy,dby,loss,_,_ = forward_backward(inputs,target,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev)
   idx = 0
   for param,dparam,name in zip([Wy,lstm_units[idx].lstm_param.Wg, lstm_units[idx].lstm_param.Wi, lstm_units[idx].lstm_param.Wf, lstm_units[idx].lstm_param.Wo,by,lstm_units[idx].lstm_param.bg,lstm_units[idx].lstm_param.bi,lstm_units[idx].lstm_param.bf,lstm_units[idx].lstm_param.bo], [dWy,lstm_units[idx].lstm_param.dWg, lstm_units[idx].lstm_param.dWi,lstm_units[idx].lstm_param.dWf, lstm_units[idx].lstm_param.dWo,dby,lstm_units[idx].lstm_param.dbg,lstm_units[idx].lstm_param.dbi,lstm_units[idx].lstm_param.dbf,lstm_units[idx].lstm_param.dbo], ['Wy', 'Wg-0', 'Wi-0', 'Wf-0', 'Wo-0','by','bg-0','bi-0','bf-0','bo-0']):
 
@@ -344,100 +345,110 @@ def gradCheck_full(inputs,target,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev
         print '%f, %f => %e ' % (grad_numerical, grad_analytic, rel_error)
         # rel_error should be on order of 1e-7 or less
 
-txtFile = sys.argv[1]
-num_lstm_layers = 2
-seq_len = 25
 
-f = open(txtFile,'r')
-data = f.read()
-chars = list(set(data))
-num_data = len(data)
-vocab_size = len(chars)
-char_to_index = {c:i for i,c in enumerate(chars)}
-index_to_char = {i:c for i,c in enumerate(chars)}
-
-lstm_units = {} 
-
-input_dim = vocab_size
-num_hidden_units = 100
-learning_rate = 0.1
+def train(txtFile,num_lstm_layers,seq_len,num_hidden_units,learning_rate):
 
 
-for i in range(num_lstm_layers):
-  lstm_units[i] = LSTMUnit(num_hidden_units,input_dim)
-  input_dim = num_hidden_units
+  f = open(txtFile,'r')
+  data = f.read()
+  chars = list(set(data))
+  num_data = len(data)
+  vocab_size = len(chars)
+  char_to_index = {c:i for i,c in enumerate(chars)}
+  index_to_char = {i:c for i,c in enumerate(chars)}
+
+  lstm_units = {} 
+
+  input_dim = vocab_size
 
 
-Wy = np.random.randn(vocab_size,num_hidden_units)*0.01
-by = np.zeros((vocab_size,1))*0.01
-
-mWy = np.zeros_like(Wy)
-mby = np.zeros_like(by)
+  for i in range(num_lstm_layers):
+    lstm_units[i] = LSTMUnit(num_hidden_units,input_dim)
+    input_dim = num_hidden_units
 
 
-count = 0
+  Wy = np.random.randn(vocab_size,num_hidden_units)*0.01
+  by = np.zeros((vocab_size,1))*0.01
 
-i=0
-inputs = [char_to_index[ch] for ch in data[i*seq_len:(i+1)*seq_len]]
-outputs= [char_to_index[ch] for ch in data[i*seq_len + 1:(i+1)*seq_len + 1]]
-
-hprev = {}
-cprev = {}
-
-for i in range(num_lstm_layers):
-  hprev[i] = np.zeros((num_hidden_units,1))
-  cprev[i] = np.zeros((num_hidden_units,1))
+  mWy = np.zeros_like(Wy)
+  mby = np.zeros_like(by)
 
 
-gradCheck(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev)
+  count = 0
 
+  i=0
+  inputs = [char_to_index[ch] for ch in data[i*seq_len:(i+1)*seq_len]]
+  outputs= [char_to_index[ch] for ch in data[i*seq_len + 1:(i+1)*seq_len + 1]]
 
-#pdb.set_trace()
-
-while True:
+  hprev = {}
+  cprev = {}
 
   for i in range(num_lstm_layers):
     hprev[i] = np.zeros((num_hidden_units,1))
     cprev[i] = np.zeros((num_hidden_units,1))
 
 
-  for i in range(len(data)/seq_len):
-    inputs = [char_to_index[ch] for ch in data[i*seq_len:(i+1)*seq_len]]
-    outputs= [char_to_index[ch] for ch in data[i*seq_len + 1:(i+1)*seq_len + 1]]
+  gradCheck(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev)
 
-    dWy,dby,loss,hprev,cprev = forward_backward(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev)
+
+  #pdb.set_trace()
+
+  loss1 = 0
+
+  while True:
+
+    for i in range(num_lstm_layers):
+      hprev[i] = np.zeros((num_hidden_units,1))
+      cprev[i] = np.zeros((num_hidden_units,1))
+
+
+    for i in range(len(data)/seq_len):
+      inputs = [char_to_index[ch] for ch in data[i*seq_len:(i+1)*seq_len]]
+      outputs= [char_to_index[ch] for ch in data[i*seq_len + 1:(i+1)*seq_len + 1]]
+
+      dWy,dby,loss,hprev,cprev = forward_backward(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev)
      
-    #pdb.set_trace()
- 
-    np.clip(dWy,-1,1,out=dWy)
-    np.clip(dby,-1,1,out=dby)
-
- 
-    mWy += (dWy)*(dWy)
-    mby += (dby)*(dby)
-
-    Wy -= learning_rate*dWy/(np.sqrt(mWy + 1e-8))
-    by -= learning_rate*dby/(np.sqrt(mby + 1e-8))
-
-    #Wy -= learning_rate*dWy
-    #by -= learning_rate*dby
-
-
-    #pdb.set_trace()
-
-
-    for k in range(num_lstm_layers):
-      lstm_units[k].lstm_param.adagrad_step(learning_rate)
-
-    if count%100 == 0:
-
-      #gradCheck(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev)
       #pdb.set_trace()
-      seq = sample(inputs[0],Wy,by,lstm_units,vocab_size,index_to_char,50,hprev,cprev)
-      txt = ''.join(ix for ix in seq)
-      print txt
+ 
+      np.clip(dWy,-5,5,out=dWy)
+      np.clip(dby,-5,5,out=dby)
 
-    count += 1
+ 
+      mWy += (dWy)*(dWy)
+      mby += (dby)*(dby)
 
-    #if count%1000 == 0:
-    #  gradCheck(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev)
+      Wy -= learning_rate*dWy/(np.sqrt(mWy + 1e-8))
+      by -= learning_rate*dby/(np.sqrt(mby + 1e-8))
+
+      #Wy -= learning_rate*dWy
+      #by -= learning_rate*dby
+
+
+      #pdb.set_trace()
+
+      #print 'loss =',loss
+
+      for k in range(num_lstm_layers):
+        lstm_units[k].lstm_param.adagrad_step(learning_rate)
+
+      if count%100 == 0:
+
+        #gradCheck(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev)
+        #pdb.set_trace()
+        seq = sample(char_to_index[data[(i+1)*seq_len + 1]],Wy,by,lstm_units,vocab_size,index_to_char,100,hprev,cprev)
+        txt = ''.join(ix for ix in seq)
+        
+        print txt + ' END ' 
+
+      count += 1
+
+      #if count%1000 == 0:
+      #  gradCheck(inputs,outputs,Wy,by,lstm_units,seq_len,vocab_size,hprev,cprev)
+
+
+txtFile1 = sys.argv[1]
+train(txtFile1,2,50,128,0.1)
+
+
+
+
